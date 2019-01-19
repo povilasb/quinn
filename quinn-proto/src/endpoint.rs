@@ -16,7 +16,7 @@ use slog::{self, Logger};
 
 use crate::coding::BufMutExt;
 use crate::connection::{
-    self, initial_close, ClientConfig, Connection, ConnectionError, TimerUpdate,
+    self, initial_close, ClientConfig, Connection, ConnectionError, EndpointEvent, TimerUpdate,
 };
 use crate::crypto::{
     self, reset_token_for, Crypto, CryptoClientConfig, CryptoServerConfig, RingHeaderCrypto,
@@ -50,6 +50,8 @@ pub struct Endpoint {
     dirty_timers: FnvHashSet<ConnectionHandle>,
     /// Connections that might have packets to send
     needs_transmit: FnvHashSet<ConnectionHandle>,
+    /// Connections that might have endpoint-facing events to report
+    endpoint_eventful_conns: FnvHashSet<ConnectionHandle>,
     /// Connections that might have application-facing events to report
     eventful_conns: FnvHashSet<ConnectionHandle>,
     incoming_handshakes: usize,
@@ -74,6 +76,7 @@ impl Endpoint {
             connections: Slab::new(),
             dirty_timers: FnvHashSet::default(),
             needs_transmit: FnvHashSet::default(),
+            endpoint_eventful_conns: FnvHashSet::default(),
             eventful_conns: FnvHashSet::default(),
             incoming_handshakes: 0,
             config,
@@ -87,6 +90,7 @@ impl Endpoint {
 
     /// Get an application-facing event
     pub fn poll(&mut self) -> Option<(ConnectionHandle, Event)> {
+        self.handle_endpoint_events();
         if let Some(ch) = self.incoming.pop_front() {
             return Some((ch, Event::Incoming));
         }
@@ -97,6 +101,18 @@ impl Endpoint {
             self.eventful_conns.remove(&ch);
         }
         None
+    }
+
+    pub(crate) fn handle_endpoint_events(&mut self) {
+        while let Some(&ch) = self.endpoint_eventful_conns.iter().next() {
+            while let Some(event) = self.connections[ch].poll_endpoint_events() {
+                if let EndpointEvent::Incoming = &event {
+                    self.incoming.push_back(ch);
+                }
+                self.handle_event(ch, event);
+            }
+            self.endpoint_eventful_conns.remove(&ch);
+        }
     }
 
     /// Get a pending timer update
@@ -138,6 +154,23 @@ impl Endpoint {
                 return Some(transmit);
             } else {
                 self.needs_transmit.remove(&ch);
+            }
+        }
+    }
+
+    pub fn handle_event(&mut self, ch: ConnectionHandle, event: EndpointEvent) {
+        match event {
+            EndpointEvent::Incoming | EndpointEvent::ClientReady => {
+                if self.config.local_cid_len != 0 {
+                    /// connection IDs
+                    const LOCAL_CID_COUNT: usize = 8;
+                    // We've already issued one CID as part of the normal handshake process.
+                    for _ in 1..LOCAL_CID_COUNT {
+                        let cid = self.new_cid();
+                        self.connection_ids.insert(cid, ch);
+                        self.connections[ch].issue_cid(cid);
+                    }
+                }
             }
         }
     }
@@ -209,15 +242,10 @@ impl Endpoint {
                 .cloned()
         };
         if let Some(ch) = known_ch {
-            let had_1rtt = self.connections[ch].has_1rtt();
             self.connections[ch].handle_dgram(now, remote, ecn, partial_decode, rest);
-            if !had_1rtt
-                && (self.connections[ch].has_1rtt() || !self.connections[ch].is_handshaking())
-            {
-                self.issue_identifiers(ch);
-            }
             self.needs_transmit.insert(ch);
             self.dirty_timers.insert(ch);
+            self.endpoint_eventful_conns.insert(ch);
             self.eventful_conns.insert(ch);
             return;
         }
@@ -558,10 +586,7 @@ impl Endpoint {
                 trace!(self.log, "connection incoming; ICID {icid}", icid = dst_cid);
                 self.incoming_handshakes += 1;
                 self.needs_transmit.insert(ch);
-                if self.connections[ch].has_1rtt() {
-                    self.incoming.push_back(ch);
-                    self.issue_identifiers(ch);
-                }
+                self.endpoint_eventful_conns.insert(ch);
             }
             Err(e) => {
                 debug!(self.log, "handshake failed"; "reason" => %e);
@@ -571,21 +596,6 @@ impl Endpoint {
                     ecn: None,
                     packet: initial_close(crypto, header_crypto, &src_cid, &temp_loc_cid, 0, e),
                 });
-            }
-        }
-    }
-
-    /// Connection is either ready to accept data or failed.
-    fn issue_identifiers(&mut self, ch: ConnectionHandle) {
-        if self.config.local_cid_len != 0 && !self.connections[ch].is_closed() {
-            /// Draft 17 §5.1.1: endpoints SHOULD provide and maintain at least eight
-            /// connection IDs
-            const LOCAL_CID_COUNT: usize = 8;
-            // We've already issued one CID as part of the normal handshake process.
-            for _ in 1..LOCAL_CID_COUNT {
-                let cid = self.new_cid();
-                self.connection_ids.insert(cid, ch);
-                self.connections[ch].issue_cid(cid);
             }
         }
     }

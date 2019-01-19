@@ -296,6 +296,7 @@ impl TestEndpoint {
             self.endpoint
                 .handle(now, remote, ecn, Vec::from(packet).into());
         }
+        self.endpoint.handle_endpoint_events();
         while let Some(x) = self.endpoint.poll_transmit(now) {
             self.outbound.push_back(x);
         }
