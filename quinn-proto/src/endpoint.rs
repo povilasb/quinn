@@ -109,7 +109,15 @@ impl Endpoint {
                 if let EndpointEvent::Incoming = &event {
                     self.incoming.push_back(ch);
                 }
+                let done = if let EndpointEvent::Closed { .. } = &event {
+                    true
+                } else {
+                    false
+                };
                 self.handle_event(ch, event);
+                if done {
+                    break;
+                }
             }
             self.endpoint_eventful_conns.remove(&ch);
         }
@@ -171,6 +179,24 @@ impl Endpoint {
                         self.connections[ch].issue_cid(cid);
                     }
                 }
+            }
+            EndpointEvent::Closed {
+                init_cid,
+                loc_cids,
+                remote,
+            } => {
+                if let Some(init_cid) = init_cid {
+                    self.connection_ids_initial.remove(&init_cid);
+                }
+                for cid in loc_cids {
+                    self.connection_ids.remove(&cid);
+                }
+                self.connection_remotes.remove(&remote);
+                self.dirty_timers.remove(&ch);
+                self.eventful_conns.remove(&ch);
+                self.endpoint_eventful_conns.remove(&ch);
+                self.needs_transmit.remove(&ch);
+                self.connections.remove(ch.0);
             }
         }
     }
@@ -590,7 +616,7 @@ impl Endpoint {
             }
             Err(e) => {
                 debug!(self.log, "handshake failed"; "reason" => %e);
-                self.forget(ch);
+                self.endpoint_eventful_conns.insert(ch);
                 self.transmits.push_back(Transmit {
                     destination: remote,
                     ecn: None,
@@ -600,28 +626,10 @@ impl Endpoint {
         }
     }
 
-    fn forget(&mut self, ch: ConnectionHandle) {
-        if self.connections[ch].side().is_server() {
-            self.connection_ids_initial
-                .remove(&self.connections[ch].init_cid);
-        }
-        if self.config.local_cid_len > 0 {
-            for cid in self.connections[ch].loc_cids() {
-                self.connection_ids.remove(cid);
-            }
-        }
-        self.connection_remotes
-            .remove(&self.connections[ch].remote());
-        self.dirty_timers.remove(&ch);
-        self.eventful_conns.remove(&ch);
-        self.needs_transmit.remove(&ch);
-        self.connections.remove(ch.0);
-    }
-
     /// Handle a timer expiring
     pub fn timeout(&mut self, now: Instant, ch: ConnectionHandle, timer: Timer) {
         if self.connections[ch].timeout(now, timer) {
-            self.forget(ch);
+            self.endpoint_eventful_conns.insert(ch);
             return;
         }
         self.dirty_timers.insert(ch);
@@ -754,12 +762,9 @@ impl Endpoint {
     /// This does not ensure delivery of outstanding data. It is the application's responsibility
     /// to call this only when all important communications have been completed.
     pub fn close(&mut self, now: Instant, ch: ConnectionHandle, error_code: u16, reason: Bytes) {
-        if self.connections[ch].is_drained() {
-            self.forget(ch);
-            return;
-        }
         self.connections[ch].close(now, error_code, reason);
         self.needs_transmit.insert(ch);
+        self.endpoint_eventful_conns.insert(ch);
     }
 
     /// Free a handshake slot for reuse

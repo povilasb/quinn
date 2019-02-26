@@ -38,7 +38,7 @@ pub struct Connection {
     tls: TlsSession,
     app_closed: bool,
     /// DCID of Initial packet
-    pub(crate) init_cid: ConnectionId,
+    init_cid: ConnectionId,
     loc_cids: HashMap<u64, ConnectionId>,
     /// The CID we initially chose, for use during the handshake
     handshake_cid: ConnectionId,
@@ -529,6 +529,9 @@ impl Connection {
         match timer {
             Timer::Close => {
                 self.state = State::Drained;
+                if self.app_closed {
+                    self.send_closed_event();
+                }
                 return self.app_closed;
             }
             Timer::Idle => {
@@ -536,6 +539,9 @@ impl Connection {
                 self.io.timer_stop(Timer::Close);
                 self.events.push_back(ConnectionError::TimedOut.into());
                 self.state = State::Drained;
+                if self.app_closed {
+                    self.send_closed_event();
+                }
                 return self.app_closed;
             }
             Timer::KeepAlive => {
@@ -867,26 +873,38 @@ impl Connection {
         packet: Packet,
         remaining: Option<BytesMut>,
     ) -> Result<(), TransportError> {
-        let len = packet.header_data.len() + packet.payload.len();
-        self.on_packet_authenticated(now, SpaceId::Initial, ecn, Some(packet_number), false, len);
-        self.process_early_payload(now, packet)?;
-        if self.state.is_closed() {
-            return Ok(());
-        }
-        let params = self
-            .tls
-            .transport_parameters()?
-            .ok_or_else(|| TransportError::PROTOCOL_VIOLATION("transport parameters missing"))?;
-        self.set_params(params)?;
-        self.write_tls();
-        self.init_0rtt();
-        if let Some(data) = remaining {
-            self.handle_coalesced(now, remote, ecn, data);
-        }
-        if self.has_1rtt() {
-            self.endpoint_events.push_back(EndpointEvent::Incoming);
-        }
-        Ok(())
+        let res = {
+            let len = packet.header_data.len() + packet.payload.len();
+            self.on_packet_authenticated(
+                now,
+                SpaceId::Initial,
+                ecn,
+                Some(packet_number),
+                false,
+                len,
+            );
+            self.process_early_payload(now, packet)?;;
+            if self.state.is_closed() {
+                return Ok(());
+            }
+            let params = self.tls.transport_parameters()?.ok_or_else(|| {
+                TransportError::PROTOCOL_VIOLATION("transport parameters missing")
+            })?;
+            self.set_params(params)?;
+            self.write_tls();
+            self.init_0rtt();
+            if let Some(data) = remaining {
+                self.handle_coalesced(now, remote, ecn, data);
+            }
+            if self.has_1rtt() {
+                self.endpoint_events.push_back(EndpointEvent::Incoming);
+            }
+            Ok(())
+        };
+        res.map_err(|e| {
+            self.send_closed_event();
+            e
+        })
     }
 
     fn init_0rtt(&mut self) {
@@ -2423,6 +2441,10 @@ impl Connection {
     /// This does not ensure delivery of outstanding data. It is the application's responsibility
     /// to call this only when all important communications have been completed.
     pub fn close(&mut self, now: Instant, error_code: u16, reason: Bytes) {
+        if self.state.is_drained() {
+            self.send_closed_event();
+        }
+
         let was_closed = self.state.is_closed();
         let reason =
             state::CloseReason::Application(frame::ApplicationClose { error_code, reason });
@@ -2837,6 +2859,18 @@ impl Connection {
         self.key_phase = !self.key_phase;
     }
 
+    fn send_closed_event(&mut self) {
+        self.endpoint_events.push_back(EndpointEvent::Closed {
+            init_cid: if self.side.is_server() {
+                Some(self.init_cid)
+            } else {
+                None
+            },
+            loc_cids: self.loc_cids.values().cloned().collect(),
+            remote: self.remote(),
+        });
+    }
+
     pub fn is_handshaking(&self) -> bool {
         self.state.is_handshake()
     }
@@ -2855,10 +2889,6 @@ impl Connection {
 
     pub fn has_1rtt(&self) -> bool {
         self.spaces[SpaceId::Data as usize].crypto.is_some()
-    }
-
-    pub fn is_drained(&self) -> bool {
-        self.state.is_drained()
     }
 
     /// Look up whether we're the client or server of this Connection
@@ -3251,6 +3281,11 @@ const MAX_ACK_BLOCKS: usize = 64;
 pub enum EndpointEvent {
     ClientReady,
     Incoming,
+    Closed {
+        init_cid: Option<ConnectionId>,
+        loc_cids: Vec<ConnectionId>,
+        remote: SocketAddr,
+    },
 }
 
 /// I/O operations to be immediately executed the backend.
