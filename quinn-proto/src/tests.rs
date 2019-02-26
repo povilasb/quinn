@@ -346,7 +346,7 @@ impl TestEndpoint {
     }
 
     fn assert_accept(&mut self) -> ConnectionHandle {
-        if let Some((c, Event::Handshaking)) = self.poll() {
+        if let Some((c, Event::Incoming)) = self.poll() {
             self.accept();
             c
         } else {

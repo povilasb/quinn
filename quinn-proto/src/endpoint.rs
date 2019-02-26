@@ -88,7 +88,7 @@ impl Endpoint {
     /// Get an application-facing event
     pub fn poll(&mut self) -> Option<(ConnectionHandle, Event)> {
         if let Some(ch) = self.incoming.pop_front() {
-            return Some((ch, Event::Handshaking));
+            return Some((ch, Event::Incoming));
         }
         while let Some(&ch) = self.eventful_conns.iter().next() {
             if let Some(e) = self.connections[ch].poll() {
@@ -754,7 +754,7 @@ impl Endpoint {
 
     /// Free a handshake slot for reuse
     ///
-    /// Every time an [`Event::Handshaking`] is emitted, a slot is consumed, up to a limit of
+    /// Every time an [`Event::Incoming`] is emitted, a slot is consumed, up to a limit of
     /// [`ServerConfig.accept_buffer`]. Calling this indicates the application's acceptance of that
     /// connection and releases the slot for reuse.
     pub fn accept(&mut self) {
@@ -1036,7 +1036,7 @@ pub enum ConfigError {
 #[derive(Debug)]
 pub enum Event {
     /// An incoming connection has begun handshake procedure
-    Handshaking,
+    Incoming,
     /// A connection was successfully established.
     Connected,
     /// A connection was lost.

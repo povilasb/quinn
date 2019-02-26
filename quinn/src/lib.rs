@@ -360,7 +360,7 @@ impl Future for Driver {
                             .unwrap()
                             .send(None);
                     }
-                    Handshaking => {
+                    Incoming => {
                         endpoint.pending.insert(ch, Pending::new(None));
                         match endpoint.incoming.poll_ready() {
                             Ok(Async::Ready(())) => {
