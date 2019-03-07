@@ -27,9 +27,11 @@ use quinn::{
 fn main() {
     let mut runtime = Runtime::new().unwrap();
 
-    // server and client are running on the same thread asynchronously
-    let server_cert = run_server(&mut runtime, "0.0.0.0:5000").unwrap();
-    run_client(&mut runtime, &server_cert).unwrap();
+    let server1_cert = run_server(&mut runtime, "0.0.0.0:5000").unwrap();
+    let _server2_cert = run_server(&mut runtime, "0.0.0.0:5001").unwrap();
+    run_client(&mut runtime, &ipv4_addr(127, 0, 0, 1, 5000), &server1_cert).unwrap();
+    // should fail because client is trusting the wrong certificate
+    run_client(&mut runtime, &ipv4_addr(127, 0, 0, 1, 5001), &server1_cert).unwrap();
 
     // hang indefinitely
     let _ = runtime.block_on(future::empty::<(), ()>());
@@ -77,7 +79,7 @@ fn configure_server() -> Result<(ServerConfig, Vec<u8>), Error> {
     Ok((cfg_builder.build(), cert_der))
 }
 
-fn run_client(runtime: &mut Runtime, server_cert: &[u8]) -> Result<(), Error> {
+fn run_client(runtime: &mut Runtime, server_addr: &SocketAddr, server_cert: &[u8]) -> Result<(), Error> {
     let client_cfg = configure_client(server_cert)?;
     let mut endpoint_builder = Endpoint::new();
     endpoint_builder.default_client_config(client_cfg);
@@ -85,7 +87,6 @@ fn run_client(runtime: &mut Runtime, server_cert: &[u8]) -> Result<(), Error> {
     let (endpoint, driver, _) = endpoint_builder.bind("0.0.0.0:0")?;
     runtime.spawn(driver.map_err(|e| eprintln!("IO error: {}", e)));
 
-    let server_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 5000));
     let connect = endpoint
         .connect(&server_addr, "localhost")?
         .map_err(|e| panic!("Failed to connect: {}", e))
@@ -107,4 +108,8 @@ fn configure_client(server_cert: &[u8]) -> Result<ClientConfig, Error> {
     let mut cfg_builder = ClientConfigBuilder::new();
     cfg_builder.add_certificate_authority(Certificate::from_der(server_cert)?)?;
     Ok(cfg_builder.build())
+}
+
+fn ipv4_addr(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
 }
