@@ -514,6 +514,7 @@ impl Drop for ConnectionInner {
     fn drop(&mut self) {
         if !self.inner.is_drained() {
             // Ensure the endpoint can tidy up
+            println!("[connection] drop(), send EndpointEvent::Drained");
             let _ = self.endpoint_events.unbounded_send((
                 self.handle,
                 EndpointEvent::Proto(quinn::EndpointEvent::Drained),

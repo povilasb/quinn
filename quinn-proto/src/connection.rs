@@ -493,12 +493,14 @@ impl Connection {
         match timer {
             Timer::Close => {
                 self.state = State::Drained;
+                println!("[connection] send EndpointEvent::Drained: close timeout");
                 self.endpoint_events.push_back(EndpointEvent::Drained);
             }
             Timer::Idle => {
                 self.close_common();
                 self.events.push_back(ConnectionError::TimedOut.into());
                 self.state = State::Drained;
+                println!("[connection] send EndpointEvent::Drained: Idle timeout");
                 self.endpoint_events.push_back(EndpointEvent::Drained);
             }
             Timer::KeepAlive => {
@@ -1187,6 +1189,7 @@ impl Connection {
             }
         }
         if !was_drained && self.state.is_drained() {
+            println!("[connection] handle_packet() send EndpointEvent::Drained");
             self.endpoint_events.push_back(EndpointEvent::Drained);
             // Close timer may have been started previously, e.g. if we sent a close and got a
             // stateless reset in response

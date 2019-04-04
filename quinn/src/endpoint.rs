@@ -187,6 +187,7 @@ impl EndpointInner {
                 Ok(Async::Ready((n, addr, ecn))) => {
                     match self.inner.handle(now, addr, ecn, (&buf[0..n]).into()) {
                         Some((handle, DatagramEvent::NewConnection(conn))) => {
+                            println!("[endpoint_inner] new conn: {:?}", handle);
                             let conn = ConnectionDriver(self.create_connection(handle, conn));
                             if !self.incoming_live {
                                 conn.0.lock().unwrap().implicit_close();
@@ -198,6 +199,9 @@ impl EndpointInner {
                         }
                         Some((handle, DatagramEvent::ConnectionEvent(event))) => {
                             // Ignoring errors from dropped connections that haven't yet been cleaned up
+                            if !self.connections.contains_key(&handle) {
+                                println!("[endpoint_inner] event for non-existant conn: {:?}", handle);
+                            }
                             let _ = self
                                 .connections
                                 .get_mut(&handle)
@@ -271,6 +275,7 @@ impl EndpointInner {
                 Ok(Async::Ready(Some((ch, event)))) => match event {
                     Proto(e) => {
                         if let quinn::EndpointEvent::Drained = e {
+                            println!("[endpoint_inner] remove conn: {:?}", ch);
                             self.connections.remove(&ch);
                         }
                         if let Some(event) = self.inner.handle_event(ch, e) {

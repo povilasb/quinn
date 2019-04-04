@@ -50,6 +50,8 @@ pub struct Endpoint {
     ///
     /// Equivalent to a `ServerConfig.accept_buffer` of `0`, but can be changed after the endpoint is constructed.
     reject_new_connections: bool,
+
+    removed_conns: Vec<usize>,
 }
 
 impl Endpoint {
@@ -72,6 +74,7 @@ impl Endpoint {
             config,
             server_config,
             reject_new_connections: false,
+            removed_conns: Default::default(),
         })
     }
 
@@ -116,11 +119,14 @@ impl Endpoint {
                 self.connection_remotes.insert(remote, ch);
             }
             EndpointEvent::Drained => {
+                println!("[proto::endpoint] received EndpointEvent::Drained, removing connection: {:?}", ch);
+                self.removed_conns.push(ch.0);
                 let conn = self.connections.remove(ch.0);
                 if conn.init_cid.len() > 0 {
                     self.connection_ids_initial.remove(&conn.init_cid);
                 }
                 for cid in conn.loc_cids.values() {
+                    println!(" rm from connection_ids: {}", cid);
                     self.connection_ids.remove(&cid);
                 }
                 self.connection_remotes.remove(&conn.remote);
@@ -183,6 +189,11 @@ impl Endpoint {
             } else {
                 None
             };
+            if let Some(ref ch) = ch {
+                if self.removed_conns.contains(&ch.0) {
+                    println!("[proto::endpoint] handle(): got packet from removed conn: {} - CID({}) was still in connection_ids", ch.0, dst_cid);
+                }
+            }
             ch.or_else(|| self.connection_ids_initial.get(&dst_cid))
                 .or_else(|| {
                     // If CIDs are in use, only stateless resets (which use short headers) will
@@ -345,6 +356,7 @@ impl Endpoint {
         let mut ids = vec![];
         for _ in 0..num {
             let cid = self.new_cid();
+            println!("[proto::endpoint] send_new_identifiers(): insert connection_ids: {} for handle: {}", cid, ch.0);
             self.connection_ids.insert(cid, ch);
             let meta = &mut self.connections[ch];
             meta.cids_issued += 1;
@@ -425,6 +437,7 @@ impl Endpoint {
         let ch = ConnectionHandle(id);
 
         if self.config.local_cid_len > 0 {
+            println!("[proto::endpoint] add_connection(): insert connection_ids: {} for handle: {}", loc_cid, ch.0);
             self.connection_ids.insert(loc_cid, ch);
         }
         self.connection_remotes.insert(remote, ch);
